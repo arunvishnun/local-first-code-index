@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorkerCodeIndex } from '../dist/index.js';
@@ -22,6 +22,34 @@ test('worker-thread API indexes and queries without running the engine on the ca
     assert.ok(context.snippets[0].content.includes('workerSearchTarget'));
     await index.close();
     index = undefined;
+  } finally {
+    if (index) await index.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('worker startup preserves the original storage error for current and future calls', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'local-code-index-worker-error-'));
+  const invalidStoragePath = path.join(root, 'database-directory');
+  let index;
+  try {
+    await mkdir(invalidStoragePath);
+    index = createWorkerCodeIndex({
+      workspaceRoot: root,
+      storagePath: invalidStoragePath,
+      watch: { enabled: false },
+    });
+
+    await assert.rejects(index.start(), (error) => {
+      assert.doesNotMatch(error.message, /exited .*code/i);
+      assert.match(error.message, /directory|database|open/i);
+      return true;
+    });
+    await assert.rejects(index.getStats(), (error) => {
+      assert.doesNotMatch(error.message, /exited .*code/i);
+      assert.match(error.message, /directory|database|open/i);
+      return true;
+    });
   } finally {
     if (index) await index.close();
     await rm(root, { recursive: true, force: true });

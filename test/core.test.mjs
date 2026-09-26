@@ -10,9 +10,7 @@ async function fixture() {
   await mkdir(path.join(root, 'src'), { recursive: true });
   await mkdir(path.join(root, 'node_modules', 'ignored'), { recursive: true });
   await writeFile(path.join(root, 'src', 'helper.ts'), `
-export function refreshTree(path: string): string {
-  return 'refreshed:' + path;
-}
+export const refreshTree = (path: string): string => 'refreshed:' + path;
 
 export class TreeStore {
   load() { return refreshTree('root'); }
@@ -54,6 +52,7 @@ test('indexes, searches, resolves graph, reads context, updates incrementally an
     const refresh = index.findSymbol('refreshTree');
     assert.equal(refresh.length, 1);
     assert.equal(refresh[0].filePath, 'src/helper.ts');
+    assert.equal(refresh[0].exported, true);
 
     const results = await index.search('file explorer refresh logic', { limit: 5 });
     assert.ok(results.length > 0);
@@ -70,6 +69,15 @@ test('indexes, searches, resolves graph, reads context, updates incrementally an
     assert.ok(context.snippets.some((snippet) => snippet.content.includes('refreshTree')));
     assert.ok(context.bytesRead > 0);
 
+    const replaceEdges = index.store.replaceEdges.bind(index.store);
+    let graphRebuilds = 0;
+    index.store.replaceEdges = (edges) => {
+      graphRebuilds += 1;
+      return replaceEdges(edges);
+    };
+    assert.equal(await index.indexFile('src/helper.ts'), 'unchanged');
+    assert.equal(graphRebuilds, 0);
+
     await writeFile(path.join(root, 'src', 'helper.ts'), `
 export function rebuildNavigation(path: string): string {
   return 'rebuilt:' + path;
@@ -77,6 +85,7 @@ export function rebuildNavigation(path: string): string {
 `.trimStart());
     const updated = await index.indexFile('src/helper.ts');
     assert.ok(updated === 'indexed' || updated === 'fallback');
+    assert.equal(graphRebuilds, 1);
     assert.equal(index.findSymbol('refreshTree').length, 0);
     assert.equal(index.findSymbol('rebuildNavigation').length, 1);
 

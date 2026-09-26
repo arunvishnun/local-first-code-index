@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 import type {
   GraphEdge, ImportRecord, IndexedFile, ParsedImport, ParsedReference, ReferenceRecord, SymbolRecord,
 } from '../types.js';
@@ -38,19 +38,47 @@ export interface RankedPathRow { filePath: string; language: string; rank: numbe
 
 function asNumber(value: unknown): number { return Number(value ?? 0); }
 function asString(value: unknown): string { return String(value ?? ''); }
+function escapeLike(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
+}
 
 export class SqliteStore {
-  readonly db: DatabaseSync;
+  readonly db: Database.Database;
 
   constructor(readonly storagePath: string) {
     if (storagePath !== ':memory:') mkdirSync(path.dirname(storagePath), { recursive: true });
-    this.db = new DatabaseSync(storagePath, { timeout: 5000 });
-    this.db.exec('PRAGMA foreign_keys = ON;');
-    if (storagePath !== ':memory:') {
-      this.db.exec('PRAGMA journal_mode = WAL;');
-      this.db.exec('PRAGMA synchronous = NORMAL;');
+    this.db = new Database(storagePath, { timeout: 5000 });
+    try {
+      this.assertFts5Available();
+      this.db.exec('PRAGMA foreign_keys = ON;');
+      if (storagePath !== ':memory:') {
+        this.db.exec('PRAGMA journal_mode = WAL;');
+        this.db.exec('PRAGMA synchronous = NORMAL;');
+      }
+      this.initialize();
+    } catch (error) {
+      if (this.db.open) this.db.close();
+      throw error;
     }
-    this.initialize();
+  }
+
+  private assertFts5Available(): void {
+    try {
+      this.db.exec(`
+        CREATE VIRTUAL TABLE temp.__code_index_fts5_probe USING fts5(content);
+        DROP TABLE temp.__code_index_fts5_probe;
+      `);
+    } catch (cause) {
+      try { this.db.exec('DROP TABLE IF EXISTS temp.__code_index_fts5_probe;'); } catch { /* preserve the probe failure */ }
+      const error = new Error(
+        'local-first-code-index requires SQLite FTS5, but the loaded better-sqlite3 binary does not provide it. '
+        + 'In Electron, install an Electron-compatible prebuild or rebuild better-sqlite3 for the application runtime.',
+        { cause },
+      );
+      error.name = 'CodeIndexStorageError';
+      Object.assign(error, { code: 'CODE_INDEX_FTS5_UNAVAILABLE' });
+      throw error;
+    }
   }
 
   private initialize(): void {
@@ -260,8 +288,8 @@ export class SqliteStore {
 
   symbolSearch(tokens: string[], limit: number): RankedSymbolRow[] {
     if (tokens.length === 0) return [];
-    const conditions = tokens.flatMap(() => ['lower(s.name) = lower(?)', 'lower(s.name) LIKE lower(?)']).join(' OR ');
-    const params = tokens.flatMap((token) => [token, `%${token}%`]);
+    const conditions = tokens.flatMap(() => ['lower(s.name) = lower(?)', "lower(s.name) LIKE lower(?) ESCAPE '\\'"]).join(' OR ');
+    const params = tokens.flatMap((token) => [token, `%${escapeLike(token)}%`]);
     const rows = this.db.prepare(`
       SELECT s.*, f.language,
         CASE WHEN ${tokens.map(() => 'lower(s.name) = lower(?)').join(' OR ')} THEN 0 ELSE 1 END AS exact_rank
@@ -275,9 +303,9 @@ export class SqliteStore {
 
   pathSearch(tokens: string[], limit: number): RankedPathRow[] {
     if (tokens.length === 0) return [];
-    const conditions = tokens.map(() => 'lower(path) LIKE lower(?)').join(' OR ');
+    const conditions = tokens.map(() => "lower(path) LIKE lower(?) ESCAPE '\\'").join(' OR ');
     const rows = this.db.prepare(`SELECT path, language FROM files WHERE ${conditions} ORDER BY length(path), path LIMIT ?`)
-      .all(...tokens.map((token) => `%${token}%`), limit) as Record<string, unknown>[];
+      .all(...tokens.map((token) => `%${escapeLike(token)}%`), limit) as Record<string, unknown>[];
     return rows.map((row, index) => ({ filePath: asString(row.path), language: asString(row.language), rank: index + 1 }));
   }
 

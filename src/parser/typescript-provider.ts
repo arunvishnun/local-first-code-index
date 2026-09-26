@@ -6,6 +6,33 @@ function isExported(node: ts.Node): boolean {
   return !!modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword || modifier.kind === ts.SyntaxKind.DefaultKeyword);
 }
 
+function isTopLevelDeclaration(node: ts.Node): boolean {
+  if (ts.isVariableDeclaration(node)) return ts.isSourceFile(node.parent.parent.parent);
+  return ts.isSourceFile(node.parent);
+}
+
+function isDeclarationExported(node: ts.Node, exportedNames: Set<string>, name: string): boolean {
+  if (isExported(node) || (isTopLevelDeclaration(node) && exportedNames.has(name))) return true;
+  if (ts.isVariableDeclaration(node)) {
+    const declarationList = node.parent;
+    const statement = declarationList.parent;
+    if (ts.isVariableStatement(statement) && isExported(statement)) return true;
+  }
+  return node.parent ? isExported(node.parent) : false;
+}
+
+function collectLocalExportNames(sourceFile: ts.SourceFile): Set<string> {
+  const names = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (ts.isExportDeclaration(statement) && !statement.moduleSpecifier && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+      for (const element of statement.exportClause.elements) names.add(element.propertyName?.text ?? element.name.text);
+    } else if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) {
+      names.add(statement.expression.text);
+    }
+  }
+  return names;
+}
+
 function rangeOf(sourceFile: ts.SourceFile, node: ts.Node): { startLine: number; endLine: number; startColumn: number; endColumn: number } {
   const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile, false));
   const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
@@ -72,6 +99,7 @@ export class TypeScriptSyntaxProvider implements SyntaxProvider {
     const imports: ParsedImport[] = [];
     const references: ParsedReference[] = [];
     const symbolStack: string[] = [];
+    const exportedNames = collectLocalExportNames(sourceFile);
 
     const visit = (node: ts.Node): void => {
       let pushed = false;
@@ -82,7 +110,7 @@ export class TypeScriptSyntaxProvider implements SyntaxProvider {
           name: named.name,
           kind: named.kind,
           signature: signatureOf(sourceFile, node),
-          exported: isExported(node) || (node.parent ? isExported(node.parent) : false),
+          exported: isDeclarationExported(node, exportedNames, named.name),
         });
         symbolStack.push(named.name);
         pushed = true;

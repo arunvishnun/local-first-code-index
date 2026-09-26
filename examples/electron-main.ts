@@ -3,6 +3,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createWorkerCodeIndex } from 'local-first-code-index';
 
+// The Electron host must package better-sqlite3 for its own Electron ABI.
+// Electron Forge handles native modules; other hosts can use @electron/rebuild.
 function repoId(workspaceRoot: string): string {
   return createHash('sha256').update(workspaceRoot).digest('hex').slice(0, 16);
 }

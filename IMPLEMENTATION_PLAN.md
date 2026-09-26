@@ -92,19 +92,21 @@ Initial runtime target:
 
 Reasoning:
 
-- `node:sqlite` is available with no extra SQLite native dependency;
+- official Node 22 `node:sqlite` builds do not enable the required FTS5 module;
+- `better-sqlite3` supplies a synchronous SQLite build with FTS5 for the local worker-oriented architecture;
 - worker threads are available;
 - modern filesystem watch support is available;
 - ESM is straightforward in current Electron/Node releases.
 
 The package should not run repository indexing inside a sandboxed Electron renderer.
+The consuming Electron application owns native-module ABI preparation through its packaging system or `@electron/rebuild`.
 
 ## 3.2 Persistence
 
 V1:
 
 ```text
-Node built-in SQLite
+better-sqlite3
     ├── relational metadata
     ├── symbols
     ├── imports/references
@@ -112,15 +114,9 @@ Node built-in SQLite
     └── FTS5
 ```
 
-Possible later adapter:
+FTS5 is a required capability and is probed during construction. A missing capability is a startup error rather than a silent lexical-search degradation.
 
-```text
-StorageAdapter
-    ├── NodeSqliteStore
-    └── BetterSqlite3Store
-```
-
-Add that adapter only if Electron runtime policy requires it; do not duplicate storage implementations before the need is measured.
+V1 deliberately has one storage implementation. Introduce a `StorageAdapter` abstraction only when a second usable backend has a measured product requirement.
 
 ---
 
@@ -811,6 +807,7 @@ filesystem event
 For very large repositories, replace full graph rebuild with affected-subgraph updates only after profiling demonstrates the need.
 
 Correctness first, then optimize the graph invalidation path from telemetry.
+Unchanged direct file updates skip graph rebuilding, and watcher bursts perform one rebuild after the coalesced changed-file batch.
 
 ---
 
@@ -988,10 +985,14 @@ Already implemented and passing:
 - exact context reads;
 - incremental update;
 - persistence/reopen;
+- FTS5 replacement, removal and reset;
+- modern TS variable export metadata;
+- literal SQL `LIKE` wildcard behavior;
 - recursive watch update;
-- worker-thread API.
+- worker-thread API;
+- structured worker startup failures.
 
-Continue adding the remaining edge cases before product release.
+These tests pass on stock Node 22.14. Continue validating the minimum version and target Node/Electron/platform matrix before product release.
 
 ---
 
@@ -1457,7 +1458,7 @@ The supplied package already implements the V1 path through Phase 7:
 - telemetry;
 - integration tests.
 
-The remaining work is primarily production hardening, broader benchmarking and product integration—not placeholder implementation required to make the package usable.
+The FTS5 runtime blocker, worker startup diagnostics, modern variable export metadata and literal `LIKE` matching are implemented and regression-tested. Remaining work is production hardening, cross-platform packaging validation, broader benchmarking and product integration.
 
 ---
 
@@ -1470,7 +1471,7 @@ A repository is considered successfully integrated when all of the following are
 3. ignored dependency/build folders are not indexed;
 4. JS/TS symbols are searchable;
 5. unsupported language text is still searchable;
-6. editing a file updates the index without a full rebuild;
+6. editing a file updates source rows without a full repository reparse; graph edges may be rebuilt as one deterministic set after a changed-file batch;
 7. deleting/renaming a file eventually reconciles correctly;
 8. search returns ranked file/range references;
 9. context reads only requested source windows;
@@ -1479,5 +1480,6 @@ A repository is considered successfully integrated when all of the following are
 12. package works with Xberg disabled;
 13. optional parser failure does not break search;
 14. desktop host records per-task retrieval/model telemetry;
-15. offline A/B confirms quality non-inferiority before default-on rollout.
+15. offline A/B confirms quality non-inferiority before default-on rollout;
+16. the packaged Electron application loads `better-sqlite3`, creates a file-backed index and completes a lexical-search smoke test on every shipping platform.
 

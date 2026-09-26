@@ -6,7 +6,7 @@ The package is designed to reduce exploratory LLM/tool work by resolving reposit
 
 ## What works in this package now
 
-- Persistent local SQLite index using Node's built-in `node:sqlite` and FTS5.
+- Persistent local SQLite/FTS5 index using `better-sqlite3`.
 - File metadata, content hashes, line byte offsets and incremental updates.
 - Git-aware file discovery (`git ls-files -co --exclude-standard`) with filesystem fallback.
 - Configurable include/ignore globs, file-size limits and binary detection.
@@ -28,7 +28,7 @@ The package is designed to reduce exploratory LLM/tool work by resolving reposit
 
 Node **22.13+**.
 
-`node:sqlite` was added in Node 22.5 and no longer requires the experimental flag from Node 22.13 onward. On Node 22 it still reports an experimental warning. If your Electron runtime ships a newer Node where `node:sqlite` is release-candidate/stable, the same package API continues to work.
+The package uses `better-sqlite3` because official Node 22 builds do not enable the FTS5 module in `node:sqlite`. FTS5 is a required retrieval capability; the package fails during construction with an actionable error if the loaded SQLite binary does not provide it.
 
 For a desktop app, run the package from the Electron main process, an Electron utility process, or use the provided `WorkerCodeIndex`. Do not run repository indexing in a sandboxed renderer.
 
@@ -39,6 +39,10 @@ npm install local-first-code-index
 ```
 
 The Xberg dependency is optional. The core package does not need Xberg to index/search arbitrary text files.
+
+`better-sqlite3` is a native dependency. Normal Node installations use its compatible prebuilt binary when one is available. Electron applications must package a binary built for their Electron runtime and target architecture. Electron Forge handles native dependencies in its standard packaging flow; other applications can use [`@electron/rebuild`](https://github.com/electron/rebuild).
+
+Do not add an Electron rebuild step to this library or rebuild against system Node and then copy that binary into Electron. The consuming application owns its Electron version and ABI.
 
 ## Recommended Electron usage
 
@@ -98,6 +102,14 @@ const context = await index.getContext({ results, maxTokens: 4000 });
 
 await index.close();
 ```
+
+If Electron reports that `better_sqlite3.node` was compiled for a different `NODE_MODULE_VERSION`, rebuild it from the consuming application:
+
+```bash
+npx electron-rebuild -f -w better-sqlite3
+```
+
+Use the application's locally installed `@electron/rebuild` and verify both unpackaged development and packaged application startup on every shipping platform.
 
 ## Public operations
 
@@ -319,13 +331,22 @@ The repository tests currently cover:
 - exact-range context reads,
 - incremental single-file updates,
 - persistent reopen,
+- FTS5 replacement/removal/reset behavior,
+- modern TypeScript variable export metadata,
+- literal SQL `LIKE` wildcard handling,
 - recursive watch updates,
-- worker-thread usage.
+- worker-thread usage and startup-error propagation.
 
 Run:
 
 ```bash
 npm test
+```
+
+Run the deterministic graph benchmark separately; timing is intentionally not part of the unit test suite:
+
+```bash
+npm run benchmark:graph -- 100 2000 10000
 ```
 
 ## Known deliberate limits
@@ -338,6 +359,7 @@ These are architectural limits, not hidden failures:
 - Dynamic dispatch/member calls are not guessed when the target cannot be determined safely.
 - Non-relative imports for non-JS/TS languages are not universally resolved.
 - Xberg's broader parser coverage is optional and can involve first-use grammar downloads.
-- Node 22 reports `node:sqlite` as experimental; evaluate Node 24+ or a future storage adapter if your release policy disallows that status.
+- `better-sqlite3` is native and must be built or selected for the Node/Electron ABI and architecture that loads it.
+- Graph edges are rebuilt as a complete deterministic set after changed-file batches; use the benchmark harness before deciding whether affected-subgraph updates are warranted.
 
 See [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) for the complete phased implementation and rollout plan.

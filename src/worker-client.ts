@@ -6,6 +6,15 @@ import type {
 } from './types.js';
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void };
+type SerializedError = { name?: string; message?: string; stack?: string; code?: string };
+
+function deserializeError(value: SerializedError | undefined, fallback: string): Error {
+  const error = new Error(value?.message ?? fallback);
+  error.name = value?.name ?? 'Error';
+  if (value?.stack) error.stack = value.stack;
+  if (value?.code) Object.assign(error, { code: value.code });
+  return error;
+}
 
 function assertWorkerCompatible(config: CodeIndexConfig): void {
   if (config.syntaxProviders?.length) throw new Error('WorkerCodeIndex does not accept custom syntaxProviders because functions cannot be structured-cloned. Use CodeIndex directly or package the provider into the worker.');
@@ -17,12 +26,33 @@ export class WorkerCodeIndex extends EventEmitter {
   #nextId = 1;
   #pending = new Map<number, Pending>();
   #closed = false;
+  #ready: Promise<void>;
+  #readySettled = false;
+  #resolveReady!: () => void;
+  #rejectReady!: (error: Error) => void;
+  #failure?: Error;
 
   constructor(config: CodeIndexConfig) {
     super();
     assertWorkerCompatible(config);
+    this.#ready = new Promise<void>((resolve, reject) => {
+      this.#resolveReady = resolve;
+      this.#rejectReady = reject;
+    });
+    void this.#ready.catch(() => undefined);
     this.worker = new Worker(new URL('./worker-host.js', import.meta.url), { workerData: config });
     this.worker.on('message', (message: any) => {
+      if (message?.type === 'ready') {
+        if (!this.#readySettled && !this.#failure) {
+          this.#readySettled = true;
+          this.#resolveReady();
+        }
+        return;
+      }
+      if (message?.type === 'startup-error') {
+        this.failTerminal(deserializeError(message.error, 'Code index worker failed to start'));
+        return;
+      }
       if (message?.type === 'event') {
         this.emit('event', message.event as CodeIndexEvent);
         return;
@@ -32,15 +62,15 @@ export class WorkerCodeIndex extends EventEmitter {
       if (!pending) return;
       this.#pending.delete(message.id);
       if (message.error) {
-        const error = new Error(message.error.message);
-        error.name = message.error.name ?? 'Error';
-        if (message.error.stack) error.stack = message.error.stack;
-        pending.reject(error);
+        pending.reject(deserializeError(message.error, 'Code index worker request failed'));
       } else pending.resolve(message.result);
     });
-    this.worker.on('error', (error: Error) => this.failAll(error));
+    this.worker.on('error', (error: Error) => this.failTerminal(error));
     this.worker.on('exit', (code) => {
-      if (!this.#closed && code !== 0) this.failAll(new Error(`Code index worker exited with code ${code}`));
+      if (!this.#closed && !this.#failure) {
+        const phase = this.#readySettled ? 'unexpectedly' : 'before becoming ready';
+        this.failTerminal(new Error(`Code index worker exited ${phase} with code ${code}`));
+      }
     });
   }
 
@@ -49,8 +79,12 @@ export class WorkerCodeIndex extends EventEmitter {
     return () => this.off('event', listener);
   }
 
-  private call<T>(method: string, ...args: unknown[]): Promise<T> {
+  private async call<T>(method: string, ...args: unknown[]): Promise<T> {
     if (this.#closed) return Promise.reject(new Error('WorkerCodeIndex is closed'));
+    if (this.#failure) return Promise.reject(this.#failure);
+    await this.#ready;
+    if (this.#closed) return Promise.reject(new Error('WorkerCodeIndex is closed'));
+    if (this.#failure) return Promise.reject(this.#failure);
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve: (value) => resolve(value as T), reject });
@@ -74,7 +108,9 @@ export class WorkerCodeIndex extends EventEmitter {
 
   async close(): Promise<void> {
     if (this.#closed) return;
-    try { await this.call<void>('close'); } finally {
+    try {
+      if (!this.#failure) await this.call<void>('close');
+    } finally {
       this.#closed = true;
       await this.worker.terminate();
       this.failAll(new Error('WorkerCodeIndex closed'));
@@ -85,6 +121,16 @@ export class WorkerCodeIndex extends EventEmitter {
   private failAll(error: Error): void {
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
+  }
+
+  private failTerminal(error: Error): void {
+    if (this.#failure) return;
+    this.#failure = error;
+    if (!this.#readySettled) {
+      this.#readySettled = true;
+      this.#rejectReady(error);
+    }
+    this.failAll(error);
   }
 }
 

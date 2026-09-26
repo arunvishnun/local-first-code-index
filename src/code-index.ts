@@ -133,7 +133,9 @@ export class CodeIndex extends EventEmitter {
 
   async indexFile(filePath: string): Promise<'indexed' | 'unchanged' | 'fallback' | 'skipped'> {
     const result = await this.indexFileInternal(filePath, false);
-    if (this.config.graph.enabled && this.config.graph.resolveOnIndex && result !== 'skipped') rebuildGraph(this.store, this.config);
+    if (this.config.graph.enabled && this.config.graph.resolveOnIndex && (result === 'indexed' || result === 'fallback')) {
+      rebuildGraph(this.store, this.config);
+    }
     return result;
   }
 
@@ -236,7 +238,7 @@ export class CodeIndex extends EventEmitter {
     const relativePath = normalizeRelativePath(path.isAbsolute(filePath) ? path.relative(this.config.workspaceRoot, filePath) : filePath);
     const removed = this.store.removeFile(relativePath);
     if (removed) {
-      if (this.config.graph.enabled) rebuildGraph(this.store, this.config);
+      if (this.config.graph.enabled && this.config.graph.resolveOnIndex) rebuildGraph(this.store, this.config);
       this.emitEvent({ type: 'file-removed', at: Date.now(), filePath: relativePath });
     }
     return removed;
