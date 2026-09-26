@@ -1,0 +1,49 @@
+{
+  "name": "local-first-code-index",
+  "version": "0.1.0",
+  "description": "Local-first repository indexing and deterministic retrieval for desktop AI agents.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "IMPLEMENTATION_PLAN.md",
+    "examples"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "clean": "node ./scripts-clean.mjs",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "typescript": "5.9.3"
+  },
+  "optionalDependencies": {
+    "@xberg-io/tree-sitter-language-pack": "^1.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4"
+  },
+  "keywords": [
+    "code-index",
+    "desktop-agent",
+    "sqlite",
+    "fts5",
+    "typescript",
+    "retrieval",
+    "tree-sitter"
+  ],
+  "license": "UNLICENSED"
+}
