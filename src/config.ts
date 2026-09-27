@@ -68,6 +68,8 @@ export function normalizeConfig(config: CodeIndexConfig): NormalizedCodeIndexCon
       symbolWeight: config.search?.symbolWeight ?? 1.4,
       pathWeight: config.search?.pathWeight ?? 0.8,
       graphWeight: config.search?.graphWeight ?? 0.7,
+      proximityWeight: config.search?.proximityWeight ?? 0.02,
+      moduleWeight: config.search?.moduleWeight ?? 0.008,
       graphDepth: config.search?.graphDepth ?? 1,
       graphSeedLimit: config.search?.graphSeedLimit ?? 6,
     },
@@ -77,6 +79,14 @@ export function normalizeConfig(config: CodeIndexConfig): NormalizedCodeIndexCon
       linesBefore: config.context?.linesBefore ?? 3,
       linesAfter: config.context?.linesAfter ?? 3,
       verifyFreshness: config.context?.verifyFreshness ?? true,
+      budget: {
+        maxFiles: config.context?.budget?.maxFiles ?? 6,
+        maxSnippets: config.context?.budget?.maxSnippets ?? 8,
+        maxLines: config.context?.budget?.maxLines ?? 240,
+        maxBytes: config.context?.budget?.maxBytes ?? 24_000,
+        maxEstimatedTokens: config.context?.budget?.maxEstimatedTokens ?? config.context?.defaultMaxTokens ?? 4_000,
+        maxGraphDepth: config.context?.budget?.maxGraphDepth ?? 1,
+      },
     },
     fallbackSearch: {
       enabled: config.fallbackSearch?.enabled ?? true,

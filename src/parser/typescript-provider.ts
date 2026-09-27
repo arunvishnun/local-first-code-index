@@ -1,5 +1,5 @@
 import * as ts from 'typescript';
-import type { ParsedImport, ParsedReference, ParsedSymbol, ParsedSyntax, SymbolKind, SyntaxProvider, SyntaxProviderInput } from '../types.js';
+import type { ParsedImport, ParsedReference, ParsedSymbol, ParsedSyntax, SymbolKind, SymbolRole, SyntaxProvider, SyntaxProviderInput } from '../types.js';
 
 function isExported(node: ts.Node): boolean {
   const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
@@ -71,6 +71,16 @@ function namedSymbol(sourceFile: ts.SourceFile, node: ts.Node): { name: string; 
   return undefined;
 }
 
+function isJsxFile(input: SyntaxProviderInput): boolean {
+  return input.language === 'tsx' || /\.[jt]sx$/i.test(input.filePath);
+}
+
+function roleFor(name: string, kind: SymbolKind, input: SyntaxProviderInput): SymbolRole | undefined {
+  if (kind === 'function' && /^use[A-Z0-9]/.test(name)) return 'hook';
+  if (isJsxFile(input) && kind === 'function' && /^[A-Z]/.test(name)) return 'component';
+  return undefined;
+}
+
 function scriptKindFor(language: string, filePath: string): ts.ScriptKind {
   if (language === 'tsx' || filePath.endsWith('.tsx')) return ts.ScriptKind.TSX;
   if (language === 'typescript' || /\.(ts|mts|cts)$/.test(filePath)) return ts.ScriptKind.TS;
@@ -105,12 +115,14 @@ export class TypeScriptSyntaxProvider implements SyntaxProvider {
       let pushed = false;
       const named = namedSymbol(sourceFile, node);
       if (named) {
+        const role = roleFor(named.name, named.kind, input);
         symbols.push({
           ...rangeOf(sourceFile, node),
           name: named.name,
           kind: named.kind,
           signature: signatureOf(sourceFile, node),
           exported: isDeclarationExported(node, exportedNames, named.name),
+          ...(role ? { role } : {}),
         });
         symbolStack.push(named.name);
         pushed = true;
@@ -151,6 +163,20 @@ export class TypeScriptSyntaxProvider implements SyntaxProvider {
             sourceSymbolName: symbolStack.at(-1),
             targetName,
             kind: 'call',
+            line: pos.line + 1,
+            column: pos.character + 1,
+          });
+        }
+      }
+
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const tag = node.tagName;
+        if (ts.isIdentifier(tag) && /^[A-Z]/.test(tag.text)) {
+          const pos = sourceFile.getLineAndCharacterOfPosition(tag.getStart(sourceFile));
+          references.push({
+            sourceSymbolName: symbolStack.at(-1),
+            targetName: tag.text,
+            kind: 'reference',
             line: pos.line + 1,
             column: pos.character + 1,
           });

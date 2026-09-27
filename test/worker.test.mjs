@@ -20,6 +20,10 @@ test('worker-thread API indexes and queries without running the engine on the ca
     assert.ok(results.some((result) => result.filePath === 'main.ts'));
     const context = await index.getContext({ query: 'workerSearchTarget', maxTokens: 100 });
     assert.ok(context.snippets[0].content.includes('workerSearchTarget'));
+    const pack = await index.retrieveContext({ query: 'workerSearchTarget', intent: 'definition' });
+    assert.equal(pack.confidence, 'high');
+    assert.ok(pack.primary.some((snippet) => snippet.content.includes('workerSearchTarget')));
+    assert.equal((await index.getIndexState()).status, 'READY');
     await index.close();
     index = undefined;
   } finally {

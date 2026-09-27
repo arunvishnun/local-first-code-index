@@ -1,8 +1,17 @@
+import path from 'node:path';
 import type { NormalizedCodeIndexConfig, SearchOptions, SearchReason, SearchResult, SymbolRecord } from '../types.js';
 import { SqliteStore } from '../storage/sqlite-store.js';
-import { fileNodeId } from '../util/path.js';
+import { throwIfAborted } from '../util/abort.js';
+import { fileNodeId, normalizeRelativePath } from '../util/path.js';
 import { queryTokens, toSafeFtsQuery } from '../util/text.js';
 import { fallbackSearch } from './fallback.js';
+
+export interface SearchTrace {
+  indexQueries: number;
+  graphExpansions: number;
+  fallbackSearches: number;
+  cacheHit: boolean;
+}
 
 interface Candidate {
   filePath: string;
@@ -22,7 +31,8 @@ function keyFor(candidate: Pick<Candidate, 'filePath' | 'startLine' | 'endLine'>
 export class SearchService {
   constructor(private readonly store: SqliteStore, private readonly config: NormalizedCodeIndexConfig) {}
 
-  async search(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
+  async search(query: string, options: SearchOptions = {}, trace: SearchTrace = { indexQueries: 0, graphExpansions: 0, fallbackSearches: 0, cacheHit: false }): Promise<SearchResult[]> {
+    throwIfAborted(options.signal);
     const limit = Math.max(1, options.limit ?? this.config.search.defaultLimit);
     const overfetch = Math.max(limit * 4, 40);
     const rrfK = this.config.search.rrfK;
@@ -45,17 +55,20 @@ export class SearchService {
 
     const fts = toSafeFtsQuery(query);
     if (fts) {
+      trace.indexQueries += 1;
       const lexical = this.store.lexicalSearch(fts, overfetch);
       lexical.forEach((row) => add({
         filePath: row.filePath, language: row.language, startLine: row.startLine, endLine: row.endLine, snippet: row.text,
       }, 'lexical', row.rank, this.config.search.lexicalWeight));
     }
 
+    trace.indexQueries += 1;
     const symbols = this.store.symbolSearch(tokens, overfetch);
     symbols.forEach((row) => add({
       filePath: row.filePath, language: row.language, startLine: row.startLine, endLine: row.endLine, symbol: row,
     }, 'symbol', row.rank, this.config.search.symbolWeight));
 
+    trace.indexQueries += 1;
     const paths = this.store.pathSearch(tokens, overfetch);
     for (const row of paths) {
       const file = this.store.getFile(row.filePath);
@@ -64,6 +77,8 @@ export class SearchService {
     }
 
     if (options.expandGraph ?? true) {
+      trace.graphExpansions += 1;
+      trace.indexQueries += 1;
       const seedSymbols = symbols.slice(0, this.config.search.graphSeedLimit);
       const neighbors = this.store.graphNeighbors(
         seedSymbols.map((symbol) => symbol.id),
@@ -89,6 +104,27 @@ export class SearchService {
       }
     }
 
+    const currentFile = options.currentFile ? normalizeRelativePath(options.currentFile) : undefined;
+    const openFiles = new Set((options.openFiles ?? []).map((filePath) => normalizeRelativePath(filePath)));
+    if (currentFile || openFiles.size > 0) {
+      for (const candidate of candidates.values()) {
+        if (currentFile && candidate.filePath === currentFile) {
+          const contribution = this.config.search.proximityWeight;
+          candidate.score += contribution;
+          candidate.reasons.push({ source: 'proximity', rank: 1, contribution });
+        } else if (openFiles.has(candidate.filePath)) {
+          const contribution = this.config.search.proximityWeight * 0.5;
+          candidate.score += contribution;
+          candidate.reasons.push({ source: 'proximity', rank: 2, contribution });
+        } else if (currentFile && path.posix.dirname(candidate.filePath) === path.posix.dirname(currentFile)) {
+          const contribution = this.config.search.moduleWeight;
+          candidate.score += contribution;
+          candidate.reasons.push({ source: 'proximity', rank: 3, contribution });
+        }
+      }
+    }
+
+    throwIfAborted(options.signal);
     let results = [...candidates.values()]
       .filter((candidate) => !options.languages || options.languages.includes(candidate.language))
       .filter((candidate) => !options.pathPrefix || candidate.filePath.startsWith(options.pathPrefix))
@@ -108,6 +144,8 @@ export class SearchService {
       }));
 
     if (results.length === 0 && this.config.fallbackSearch.enabled && (options.fallbackIfEmpty ?? true)) {
+      trace.fallbackSearches += 1;
+      trace.indexQueries += 1;
       results = await fallbackSearch(query, this.store, this.config, limit);
       results = results
         .filter((candidate) => !options.languages || options.languages.includes(candidate.language))

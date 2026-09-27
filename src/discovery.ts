@@ -20,45 +20,66 @@ export function isPathIncluded(relativePath: string, config: NormalizedCodeIndex
   return matchesAny(relativePath, config.discovery.includeGlobs);
 }
 
-async function discoverWithGit(config: NormalizedCodeIndexConfig): Promise<string[]> {
+async function discoverWithGit(config: NormalizedCodeIndexConfig, signal?: AbortSignal): Promise<string[]> {
   const { stdout } = await execFileAsync('git', ['ls-files', '-co', '--exclude-standard', '-z'], {
     cwd: config.workspaceRoot,
     encoding: 'buffer',
     maxBuffer: config.discovery.gitMaxBufferBytes,
+    signal,
   });
-  return stdout.toString('utf8').split('\0').filter(Boolean).map(normalizeRelativePath).filter((file) => isPathIncluded(file, config));
+  return stdout.toString('utf8').split('\0').filter(Boolean).map(normalizeRelativePath);
 }
 
-async function discoverWithFilesystem(config: NormalizedCodeIndexConfig): Promise<string[]> {
+async function discoverWithFilesystem(config: NormalizedCodeIndexConfig, signal?: AbortSignal): Promise<DiscoveryResult> {
   const files: string[] = [];
+  let ignored = 0;
   const walk = async (directory: string): Promise<void> => {
+    if (signal?.aborted) return;
     const dir = await opendir(directory);
     for await (const entry of dir) {
+      if (signal?.aborted) return;
       const absolute = path.join(directory, entry.name);
       const relative = normalizeRelativePath(path.relative(config.workspaceRoot, absolute));
       if (entry.isSymbolicLink() && !config.discovery.followSymlinks) continue;
       if (entry.isDirectory()) {
         if (matchesAny(`${relative}/x`, config.discovery.ignoreGlobs) || matchesAny(relative, config.discovery.ignoreGlobs)) continue;
         await walk(absolute);
-      } else if (entry.isFile() && isPathIncluded(relative, config)) {
-        files.push(relative);
+      } else if (entry.isFile()) {
+        if (isPathIncluded(relative, config)) files.push(relative);
+        else ignored += 1;
       }
     }
   };
   await walk(config.workspaceRoot);
-  return files;
+  return { files, ignored };
 }
 
-export async function discoverFiles(config: NormalizedCodeIndexConfig): Promise<string[]> {
+export interface DiscoveryResult {
+  files: string[];
+  ignored: number;
+}
+
+function partitionIncluded(paths: string[], config: NormalizedCodeIndexConfig): DiscoveryResult {
+  const files: string[] = [];
+  let ignored = 0;
+  for (const relativePath of paths) {
+    if (isPathIncluded(relativePath, config)) files.push(relativePath);
+    else ignored += 1;
+  }
+  return { files, ignored };
+}
+
+export async function discoverFiles(config: NormalizedCodeIndexConfig, signal?: AbortSignal): Promise<DiscoveryResult> {
   if (config.discovery.mode !== 'filesystem') {
     try {
-      return await discoverWithGit(config);
+      return partitionIncluded(await discoverWithGit(config, signal), config);
     } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
       if (config.discovery.mode === 'git') throw error;
       config.logger.debug?.('Git discovery unavailable; using filesystem walk', { error: String(error) });
     }
   }
-  return discoverWithFilesystem(config);
+  return discoverWithFilesystem(config, signal);
 }
 
 export interface ReadableSourceFile {

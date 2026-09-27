@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { Worker } from 'node:worker_threads';
 import type {
-  CodeIndexConfig, CodeIndexEvent, ContextRequest, ContextResult, IndexRunResult, IndexStats,
-  RelatedNode, SearchOptions, SearchResult, SymbolRecord,
+  CodeIndexConfig, CodeIndexEvent, ContextPack, ContextRequest, ContextResult, FileOutline, FindSymbolOptions,
+  IndexRunResult, IndexState, IndexStats, IndexWorkspaceOptions, ReferenceHit, RelatedNode, RetrievalMetrics,
+  RetrieveContextRequest, SearchOptions, SearchResult, SnippetRead, SymbolRecord,
 } from './types.js';
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void };
@@ -97,12 +98,27 @@ export class WorkerCodeIndex extends EventEmitter {
   reconcile(): Promise<IndexRunResult> { return this.call('reconcile'); }
   indexFile(filePath: string): Promise<'indexed' | 'unchanged' | 'fallback' | 'skipped'> { return this.call('indexFile', filePath); }
   removeFile(filePath: string): Promise<boolean> { return this.call('removeFile', filePath); }
-  search(query: string, options: SearchOptions = {}): Promise<SearchResult[]> { return this.call('search', query, options); }
-  findSymbol(name: string, limit = 50): Promise<SymbolRecord[]> { return this.call('findSymbol', name, limit); }
+  search(query: string, options: SearchOptions = {}): Promise<SearchResult[]> {
+    const { signal: _signal, ...cloneable } = options;
+    return this.call('search', query, cloneable);
+  }
+  findSymbol(name: string, limitOrOptions: number | FindSymbolOptions = 50): Promise<SymbolRecord[]> { return this.call('findSymbol', name, limitOrOptions); }
+  findReferences(nameOrId: string, limit = 50): Promise<ReferenceHit[]> { return this.call('findReferences', nameOrId, limit); }
+  getDefinition(nameOrId: string): Promise<SymbolRecord | undefined> { return this.call('getDefinition', nameOrId); }
+  getFileOutline(filePath: string): Promise<FileOutline> { return this.call('getFileOutline', filePath); }
+  getSnippet(filePath: string, startLine: number, endLine: number): Promise<SnippetRead | undefined> { return this.call('getSnippet', filePath, startLine, endLine); }
+  retrieveContext(request: RetrieveContextRequest): Promise<ContextPack> {
+    const { signal: _signal, ...cloneable } = request;
+    return this.call('retrieveContext', cloneable);
+  }
+  getRelatedContext(symbol: string, budget?: RetrieveContextRequest['budget']): Promise<ContextPack> { return this.call('getRelatedContext', symbol, budget); }
   getRelated(idOrName: string): Promise<RelatedNode[]> { return this.call('getRelated', idOrName); }
   getContext(request: ContextRequest): Promise<ContextResult> { return this.call('getContext', request); }
+  getIndexState(): Promise<IndexState> { return this.call('getIndexState'); }
+  getLastRetrieval(): Promise<RetrievalMetrics | undefined> { return this.call('getLastRetrieval'); }
   getStats(): Promise<IndexStats> { return this.call('getStats'); }
   reset(): Promise<IndexRunResult> { return this.call('reset'); }
+  cancel(): Promise<void> { return this.call('cancel'); }
   startWatching(): Promise<void> { return this.call('startWatching'); }
   stopWatching(): Promise<void> { return this.call('stopWatching'); }
 

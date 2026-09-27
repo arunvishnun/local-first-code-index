@@ -15,8 +15,9 @@ export type SymbolKind =
   | 'impl'
   | 'other';
 
+export type SymbolRole = 'component' | 'hook';
 export type ReferenceKind = 'call' | 'extends' | 'implements' | 'reference';
-export type EdgeType = 'contains' | 'imports' | 'calls' | 'extends' | 'implements' | 'references';
+export type EdgeType = 'contains' | 'imports' | 'calls' | 'extends' | 'implements' | 'references' | 'tests';
 export type EdgeConfidence = 'exact' | 'resolved' | 'syntactic' | 'heuristic';
 
 export interface SourceRange {
@@ -31,6 +32,7 @@ export interface ParsedSymbol extends SourceRange {
   kind: SymbolKind;
   signature?: string;
   exported?: boolean;
+  role?: SymbolRole;
 }
 
 export interface ParsedImport {
@@ -110,8 +112,19 @@ export interface SearchConfig {
   symbolWeight?: number;
   pathWeight?: number;
   graphWeight?: number;
+  proximityWeight?: number;
+  moduleWeight?: number;
   graphDepth?: number;
   graphSeedLimit?: number;
+}
+
+export interface ContextBudget {
+  maxFiles: number;
+  maxSnippets: number;
+  maxLines: number;
+  maxBytes: number;
+  maxEstimatedTokens: number;
+  maxGraphDepth: number;
 }
 
 export interface ContextConfig {
@@ -120,6 +133,16 @@ export interface ContextConfig {
   linesBefore?: number;
   linesAfter?: number;
   verifyFreshness?: boolean;
+  budget?: Partial<ContextBudget>;
+}
+
+export interface NormalizedContextConfig {
+  defaultMaxTokens: number;
+  charsPerToken: number;
+  linesBefore: number;
+  linesAfter: number;
+  verifyFreshness: boolean;
+  budget: ContextBudget;
 }
 
 export interface FallbackSearchConfig {
@@ -165,7 +188,7 @@ export interface NormalizedCodeIndexConfig {
   chunks: Required<ChunkConfig>;
   graph: Required<GraphConfig>;
   search: Required<SearchConfig>;
-  context: Required<ContextConfig>;
+  context: NormalizedContextConfig;
   fallbackSearch: Required<FallbackSearchConfig>;
   resources: Required<ResourceConfig>;
   xberg: Required<XbergConfig>;
@@ -181,6 +204,7 @@ export interface IndexedFile {
   mtimeMs: number;
   hash: string;
   parser: string;
+  parserVersion?: string;
   parseStatus: 'parsed' | 'fallback' | 'failed';
   indexedAt: number;
 }
@@ -192,6 +216,7 @@ export interface SymbolRecord extends SourceRange {
   kind: SymbolKind;
   signature?: string;
   exported: boolean;
+  role?: SymbolRole;
 }
 
 export interface ImportRecord {
@@ -230,10 +255,20 @@ export interface SearchOptions {
   languages?: string[];
   pathPrefix?: string;
   fallbackIfEmpty?: boolean;
+  currentFile?: string;
+  openFiles?: string[];
+  signal?: AbortSignal;
+}
+
+export interface FindSymbolOptions {
+  limit?: number;
+  kind?: SymbolKind;
+  role?: SymbolRole;
+  pathPrefix?: string;
 }
 
 export interface SearchReason {
-  source: 'lexical' | 'symbol' | 'path' | 'graph' | 'fallback';
+  source: 'lexical' | 'symbol' | 'path' | 'graph' | 'proximity' | 'fallback';
   rank: number;
   contribution: number;
 }
@@ -280,14 +315,47 @@ export interface ContextResult {
   truncated: boolean;
 }
 
+export type IndexStatus = 'NOT_INDEXED' | 'INDEXING' | 'READY' | 'STALE' | 'ERROR';
+
+export type RetrievalIntent = 'definition' | 'usages' | 'callers' | 'callees' | 'tests' | 'implementation' | 'route' | 'general';
+
+export type RetrievalConfidence = 'high' | 'medium' | 'low' | 'none';
+
+export interface IndexWorkspaceOptions {
+  signal?: AbortSignal;
+}
+
 export interface IndexRunResult {
   discovered: number;
   indexed: number;
   unchanged: number;
   removed: number;
   skipped: number;
+  ignored: number;
   parseFallbacks: number;
   durationMs: number;
+  parseMs: number;
+  writeMs: number;
+  dbBytes: number;
+  peakRssBytes: number;
+  indexRevision: number;
+}
+
+export interface IncrementalIndexResult {
+  changedFiles: number;
+  filesReparsed: number;
+  relationshipsRecalculated: number;
+  elapsedMs: number;
+  cacheInvalidations: number;
+  indexRevision: number;
+}
+
+export interface IndexState {
+  status: IndexStatus;
+  revision: number;
+  lastError?: string;
+  lastRun?: IndexRunResult;
+  lastIncremental?: IncrementalIndexResult;
 }
 
 export interface IndexStats {
@@ -304,12 +372,140 @@ export interface IndexStats {
   fallbackSearches: number;
   parseFailures: number;
   genericFallbacks: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheInvalidations: number;
+  retrievals: number;
+  sourceBytesReturned: number;
+  estimatedTokensReturned: number;
+}
+
+export interface RetrievalMetrics {
+  durationMs: number;
+  indexQueries: number;
+  graphExpansions: number;
+  snippetsReturned: number;
+  filesRepresented: number;
+  sourceLinesReturned: number;
+  bytesReturned: number;
+  estimatedTokens: number;
+  fullFileBytesAvoided: number;
+  cacheHit: boolean;
+  cacheMiss: boolean;
+  indexHit: boolean;
+  fallbackSearches: number;
+  indexRevision: number;
+  indexStatus: IndexStatus;
+}
+
+export interface ReferenceHit {
+  filePath: string;
+  line: number;
+  column?: number;
+  kind: ReferenceKind;
+  targetName: string;
+  sourceSymbol?: SymbolRecord;
+}
+
+export interface FileOutlineSymbol {
+  id: string;
+  name: string;
+  kind: SymbolKind;
+  role?: SymbolRole;
+  exported: boolean;
+  signature?: string;
+  range: SourceRange;
+}
+
+export interface FileOutline {
+  filePath: string;
+  language?: string;
+  symbols: FileOutlineSymbol[];
+}
+
+export interface SnippetRead {
+  filePath: string;
+  content: string;
+  bytesRead: number;
+  startLine: number;
+  endLine: number;
+  language?: string;
+}
+
+export interface RetrieveContextRequest {
+  query: string;
+  currentFile?: string;
+  openFiles?: string[];
+  budget?: Partial<ContextBudget>;
+  intent?: RetrievalIntent;
+  signal?: AbortSignal;
+}
+
+export interface ContextPackSnippet {
+  filePath: string;
+  language: string;
+  range: SourceRange;
+  content: string;
+  estimatedTokens: number;
+  bytes: number;
+  reason: string;
+  score: number;
+  signals: SearchReason[];
+  symbol?: {
+    id: string;
+    name: string;
+    kind: SymbolKind;
+    signature?: string;
+    exported: boolean;
+    role?: SymbolRole;
+  };
+}
+
+export interface ContextCandidate {
+  filePath: string;
+  language?: string;
+  score: number;
+  reason: string;
+  symbolName?: string;
+  range?: SourceRange;
+}
+
+export interface ContextRelationship {
+  type: EdgeType;
+  confidence: EdgeConfidence;
+  from: string;
+  to: string;
+  direction: 'incoming' | 'outgoing';
+}
+
+export interface ContextImport {
+  filePath: string;
+  specifier: string;
+  localName?: string;
+  resolvedPath?: string;
+}
+
+export interface ContextPack {
+  query: string;
+  intent: RetrievalIntent;
+  confidence: RetrievalConfidence;
+  warnings: string[];
+  status: IndexStatus;
+  primary: ContextPackSnippet[];
+  related: ContextPackSnippet[];
+  relationships: ContextRelationship[];
+  imports: ContextImport[];
+  nextCandidates: ContextCandidate[];
+  metrics: RetrievalMetrics;
+  truncated: boolean;
 }
 
 export type CodeIndexEvent =
   | { type: 'index-start'; at: number }
+  | { type: 'index-progress'; at: number; completed: number; total: number; filePath: string }
   | { type: 'index-complete'; at: number; result: IndexRunResult }
   | { type: 'file-indexed'; at: number; filePath: string; parser: string }
   | { type: 'file-removed'; at: number; filePath: string }
   | { type: 'watch-error'; at: number; error: string }
-  | { type: 'parse-fallback'; at: number; filePath: string; error?: string };
+  | { type: 'parse-fallback'; at: number; filePath: string; error?: string }
+  | { type: 'status'; at: number; status: IndexStatus; error?: string };

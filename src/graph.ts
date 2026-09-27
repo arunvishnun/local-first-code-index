@@ -3,6 +3,7 @@ import * as ts from 'typescript';
 import type { GraphEdge, ImportRecord, NormalizedCodeIndexConfig, ReferenceRecord, SymbolRecord } from './types.js';
 import { SqliteStore } from './storage/sqlite-store.js';
 import { fileNodeId, normalizeRelativePath } from './util/path.js';
+import { candidateSourcePaths, isTestFile } from './util/relations.js';
 
 const resolutionExtensions = ['', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.json', '.py', '.java', '.go', '.rs', '.rb', '.php', '.cs', '.kt', '.swift'];
 
@@ -86,6 +87,21 @@ export function rebuildGraph(store: SqliteStore, config: NormalizedCodeIndexConf
 
   for (const symbol of symbols) {
     edges.push({ sourceId: fileNodeId(symbol.filePath), targetId: symbol.id, type: 'contains', confidence: 'exact', filePath: symbol.filePath });
+  }
+
+  for (const file of files) {
+    if (!isTestFile(file.path)) continue;
+    for (const sourcePath of candidateSourcePaths(file.path)) {
+      if (!fileSet.has(sourcePath)) continue;
+      edges.push({
+        sourceId: fileNodeId(sourcePath),
+        targetId: fileNodeId(file.path),
+        type: 'tests',
+        confidence: 'exact',
+        filePath: file.path,
+      });
+      break;
+    }
   }
 
   const symbolsById = new Map(symbols.map((symbol) => [symbol.id, symbol]));

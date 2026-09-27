@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import type {
   GraphEdge, ImportRecord, IndexedFile, ParsedImport, ParsedReference, ReferenceRecord, SymbolRecord,
 } from '../types.js';
+import { SCHEMA_VERSION } from '../version.js';
 
 export interface StoredChunk {
   id: string;
@@ -56,6 +57,7 @@ export class SqliteStore {
         this.db.exec('PRAGMA synchronous = NORMAL;');
       }
       this.initialize();
+      this.migrate();
     } catch (error) {
       if (this.db.open) this.db.close();
       throw error;
@@ -87,7 +89,9 @@ export class SqliteStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       ) STRICT;
-      INSERT INTO meta(key, value) VALUES ('schema_version', '1')
+      INSERT INTO meta(key, value) VALUES ('schema_version', '2')
+        ON CONFLICT(key) DO NOTHING;
+      INSERT INTO meta(key, value) VALUES ('index_revision', '0')
         ON CONFLICT(key) DO NOTHING;
 
       CREATE TABLE IF NOT EXISTS files (
@@ -97,6 +101,7 @@ export class SqliteStore {
         mtime_ms REAL NOT NULL,
         hash TEXT NOT NULL,
         parser TEXT NOT NULL,
+        parser_version TEXT,
         parse_status TEXT NOT NULL,
         line_offsets_json TEXT NOT NULL,
         indexed_at INTEGER NOT NULL
@@ -112,7 +117,8 @@ export class SqliteStore {
         start_column INTEGER,
         end_column INTEGER,
         signature TEXT,
-        exported INTEGER NOT NULL DEFAULT 0
+        exported INTEGER NOT NULL DEFAULT 0,
+        role TEXT
       ) STRICT;
       CREATE INDEX IF NOT EXISTS symbols_file_idx ON symbols(file_path);
       CREATE INDEX IF NOT EXISTS symbols_name_idx ON symbols(name COLLATE NOCASE);
@@ -170,12 +176,64 @@ export class SqliteStore {
     `);
   }
 
+  private storageError(message: string, cause?: unknown): Error {
+    const error = new Error(message, cause ? { cause } : undefined);
+    error.name = 'CodeIndexStorageError';
+    return error;
+  }
+
+  private meta(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value?: string } | undefined;
+    return row?.value;
+  }
+
+  private setMeta(key: string, value: string): void {
+    this.db.prepare(`
+      INSERT INTO meta(key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
+  }
+
+  private ensureColumn(table: 'files' | 'symbols', column: string, type: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+
+  private migrate(): void {
+    const version = Number(this.meta('schema_version') ?? '0');
+    if (version > SCHEMA_VERSION) {
+      throw this.storageError(
+        `This index was written by a newer local-first-code-index schema (version ${version}). `
+        + `This package supports schema version ${SCHEMA_VERSION}. Open it with a newer package or choose a new storage path.`,
+      );
+    }
+    this.ensureColumn('files', 'parser_version', 'TEXT');
+    this.ensureColumn('symbols', 'role', 'TEXT');
+    if (version < SCHEMA_VERSION) this.setMeta('schema_version', String(SCHEMA_VERSION));
+    if (this.meta('index_revision') == null) this.setMeta('index_revision', '0');
+  }
+
+  revision(): number {
+    return Number(this.meta('index_revision') ?? '0');
+  }
+
+  private bumpRevision(): void {
+    this.setMeta('index_revision', String(this.revision() + 1));
+  }
+
+  databaseSizeBytes(): number {
+    const pageCount = Number(this.db.pragma('page_count', { simple: true }));
+    const pageSize = Number(this.db.pragma('page_size', { simple: true }));
+    return pageCount * pageSize;
+  }
+
   close(): void { this.db.close(); }
 
   clearAll(): void {
     this.db.exec('BEGIN;');
     try {
       this.db.exec('DELETE FROM chunks_fts; DELETE FROM edges; DELETE FROM files;');
+      this.bumpRevision();
       this.db.exec('COMMIT;');
     } catch (error) {
       this.db.exec('ROLLBACK;');
@@ -190,6 +248,7 @@ export class SqliteStore {
     return {
       path: asString(row.path), language: asString(row.language), sizeBytes: asNumber(row.size_bytes),
       mtimeMs: asNumber(row.mtime_ms), hash: asString(row.hash), parser: asString(row.parser),
+      ...(row.parser_version == null ? {} : { parserVersion: asString(row.parser_version) }),
       parseStatus: asString(row.parse_status) as IndexedFile['parseStatus'], indexedAt: asNumber(row.indexed_at),
       lineOffsets: JSON.parse(asString(row.line_offsets_json)) as number[],
     };
@@ -200,10 +259,11 @@ export class SqliteStore {
   }
 
   listFiles(): IndexedFile[] {
-    const rows = this.db.prepare('SELECT path, language, size_bytes, mtime_ms, hash, parser, parse_status, indexed_at FROM files ORDER BY path').all() as Record<string, unknown>[];
+    const rows = this.db.prepare('SELECT path, language, size_bytes, mtime_ms, hash, parser, parser_version, parse_status, indexed_at FROM files ORDER BY path').all() as Record<string, unknown>[];
     return rows.map((row) => ({
       path: asString(row.path), language: asString(row.language), sizeBytes: asNumber(row.size_bytes),
       mtimeMs: asNumber(row.mtime_ms), hash: asString(row.hash), parser: asString(row.parser),
+      ...(row.parser_version == null ? {} : { parserVersion: asString(row.parser_version) }),
       parseStatus: asString(row.parse_status) as IndexedFile['parseStatus'], indexedAt: asNumber(row.indexed_at),
     }));
   }
@@ -215,17 +275,20 @@ export class SqliteStore {
       this.db.prepare('DELETE FROM chunks_fts WHERE file_path = ?').run(file.path);
       this.db.prepare('DELETE FROM files WHERE path = ?').run(file.path);
       this.db.prepare(`
-        INSERT INTO files(path, language, size_bytes, mtime_ms, hash, parser, parse_status, line_offsets_json, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(file.path, file.language, file.sizeBytes, file.mtimeMs, file.hash, file.parser, file.parseStatus, JSON.stringify(lineOffsets), file.indexedAt);
+        INSERT INTO files(path, language, size_bytes, mtime_ms, hash, parser, parser_version, parse_status, line_offsets_json, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        file.path, file.language, file.sizeBytes, file.mtimeMs, file.hash, file.parser, file.parserVersion ?? null,
+        file.parseStatus, JSON.stringify(lineOffsets), file.indexedAt,
+      );
 
       const insertSymbol = this.db.prepare(`
-        INSERT INTO symbols(id, file_path, name, kind, start_line, end_line, start_column, end_column, signature, exported)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO symbols(id, file_path, name, kind, start_line, end_line, start_column, end_column, signature, exported, role)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const symbol of symbols) insertSymbol.run(
         symbol.id, symbol.filePath, symbol.name, symbol.kind, symbol.startLine, symbol.endLine,
-        symbol.startColumn ?? null, symbol.endColumn ?? null, symbol.signature ?? null, symbol.exported ? 1 : 0,
+        symbol.startColumn ?? null, symbol.endColumn ?? null, symbol.signature ?? null, symbol.exported ? 1 : 0, symbol.role ?? null,
       );
 
       const insertImport = this.db.prepare(`
@@ -248,6 +311,7 @@ export class SqliteStore {
         insertChunk.run(chunk.id, chunk.filePath, chunk.startLine, chunk.endLine);
         insertFts.run(chunk.id, chunk.filePath, chunk.symbols, chunk.text);
       }
+      this.bumpRevision();
       this.db.exec('COMMIT;');
     } catch (error) {
       this.db.exec('ROLLBACK;');
@@ -261,6 +325,7 @@ export class SqliteStore {
       this.db.prepare('DELETE FROM chunks_fts WHERE file_path = ?').run(filePath);
       const result = this.db.prepare('DELETE FROM files WHERE path = ?').run(filePath);
       this.db.prepare('DELETE FROM edges WHERE file_path = ? OR source_id = ? OR target_id = ?').run(filePath, `file:${filePath}`, `file:${filePath}`);
+      if (Number(result.changes) > 0) this.bumpRevision();
       this.db.exec('COMMIT;');
       return Number(result.changes) > 0;
     } catch (error) {
@@ -319,9 +384,34 @@ export class SqliteStore {
     return row ? this.rowToSymbol(row) : undefined;
   }
 
-  findSymbolsByName(name: string, limit = 50): SymbolRecord[] {
-    const rows = this.db.prepare('SELECT * FROM symbols WHERE lower(name) = lower(?) ORDER BY file_path, start_line LIMIT ?').all(name, limit) as Record<string, unknown>[];
+  findSymbolsByName(name: string, limit = 50, filter: { kind?: string; role?: string; pathPrefix?: string } = {}): SymbolRecord[] {
+    const clauses = ['lower(name) = lower(?)'];
+    const params: Array<string | number> = [name];
+    if (filter.kind) {
+      clauses.push('kind = ?');
+      params.push(filter.kind);
+    }
+    if (filter.role) {
+      clauses.push('role = ?');
+      params.push(filter.role);
+    }
+    if (filter.pathPrefix) {
+      clauses.push(`file_path LIKE ? ESCAPE '\\'`);
+      params.push(`${escapeLike(filter.pathPrefix)}%`);
+    }
+    params.push(limit);
+    const rows = this.db.prepare(`SELECT * FROM symbols WHERE ${clauses.join(' AND ')} ORDER BY file_path, start_line LIMIT ?`).all(...params) as Record<string, unknown>[];
     return rows.map((row) => this.rowToSymbol(row));
+  }
+
+  referencesByTarget(name: string, limit = 50): ReferenceRecord[] {
+    const rows = this.db.prepare('SELECT * FROM refs WHERE lower(target_name) = lower(?) ORDER BY file_path, line LIMIT ?').all(name, limit) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToReference(row));
+  }
+
+  importsForFile(filePath: string): ImportRecord[] {
+    const rows = this.db.prepare('SELECT * FROM imports WHERE file_path = ? ORDER BY id').all(filePath) as Record<string, unknown>[];
+    return rows.map((row) => this.rowToImport(row));
   }
 
   allSymbols(): SymbolRecord[] {
@@ -330,24 +420,12 @@ export class SqliteStore {
 
   allImports(): ImportRecord[] {
     const rows = this.db.prepare('SELECT * FROM imports').all() as Record<string, unknown>[];
-    return rows.map((row) => ({
-      id: asNumber(row.id), filePath: asString(row.file_path), specifier: asString(row.specifier),
-      importedName: row.imported_name == null ? undefined : asString(row.imported_name),
-      localName: row.local_name == null ? undefined : asString(row.local_name),
-      resolvedPath: row.resolved_path == null ? undefined : asString(row.resolved_path),
-      isTypeOnly: asNumber(row.is_type_only) === 1,
-    }));
+    return rows.map((row) => this.rowToImport(row));
   }
 
   allReferences(): ReferenceRecord[] {
     const rows = this.db.prepare('SELECT * FROM refs').all() as Record<string, unknown>[];
-    return rows.map((row) => ({
-      id: asNumber(row.id), filePath: asString(row.file_path),
-      sourceSymbolId: row.source_symbol_id == null ? undefined : asString(row.source_symbol_id),
-      sourceSymbolName: row.source_symbol_name == null ? undefined : asString(row.source_symbol_name),
-      targetName: asString(row.target_name), kind: asString(row.kind) as ReferenceRecord['kind'],
-      line: asNumber(row.line), column: row.column_no == null ? undefined : asNumber(row.column_no),
-    }));
+    return rows.map((row) => this.rowToReference(row));
   }
 
   updateResolvedImports(updates: Array<{ id: number; resolvedPath?: string }>): void {
@@ -355,6 +433,7 @@ export class SqliteStore {
     this.db.exec('BEGIN;');
     try {
       for (const update of updates) stmt.run(update.resolvedPath ?? null, update.id);
+      this.bumpRevision();
       this.db.exec('COMMIT;');
     } catch (error) {
       this.db.exec('ROLLBACK;');
@@ -368,6 +447,7 @@ export class SqliteStore {
       this.db.exec('DELETE FROM edges;');
       const stmt = this.db.prepare('INSERT OR IGNORE INTO edges(source_id, target_id, type, confidence, file_path) VALUES (?, ?, ?, ?, ?)');
       for (const edge of edges) stmt.run(edge.sourceId, edge.targetId, edge.type, edge.confidence, edge.filePath ?? null);
+      this.bumpRevision();
       this.db.exec('COMMIT;');
     } catch (error) {
       this.db.exec('ROLLBACK;');
@@ -424,6 +504,27 @@ export class SqliteStore {
       startColumn: row.start_column == null ? undefined : asNumber(row.start_column),
       endColumn: row.end_column == null ? undefined : asNumber(row.end_column),
       signature: row.signature == null ? undefined : asString(row.signature), exported: asNumber(row.exported) === 1,
+      ...(row.role == null ? {} : { role: asString(row.role) as SymbolRecord['role'] }),
+    };
+  }
+
+  private rowToImport(row: Record<string, unknown>): ImportRecord {
+    return {
+      id: asNumber(row.id), filePath: asString(row.file_path), specifier: asString(row.specifier),
+      importedName: row.imported_name == null ? undefined : asString(row.imported_name),
+      localName: row.local_name == null ? undefined : asString(row.local_name),
+      resolvedPath: row.resolved_path == null ? undefined : asString(row.resolved_path),
+      isTypeOnly: asNumber(row.is_type_only) === 1,
+    };
+  }
+
+  private rowToReference(row: Record<string, unknown>): ReferenceRecord {
+    return {
+      id: asNumber(row.id), filePath: asString(row.file_path),
+      sourceSymbolId: row.source_symbol_id == null ? undefined : asString(row.source_symbol_id),
+      sourceSymbolName: row.source_symbol_name == null ? undefined : asString(row.source_symbol_name),
+      targetName: asString(row.target_name), kind: asString(row.kind) as ReferenceRecord['kind'],
+      line: asNumber(row.line), column: row.column_no == null ? undefined : asNumber(row.column_no),
     };
   }
 }

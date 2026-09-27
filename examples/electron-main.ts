@@ -61,21 +61,34 @@ export async function openRepositoryIndex(workspaceRoot: string) {
   return index;
 }
 
-export async function buildAgentContext(index: Awaited<ReturnType<typeof openRepositoryIndex>>, prompt: string) {
-  const results = await index.search(prompt, { limit: 12, expandGraph: true });
-  const context = await index.getContext({ results, maxTokens: 6_000 });
+export async function buildAgentContext(
+  index: Awaited<ReturnType<typeof openRepositoryIndex>>,
+  prompt: string,
+  currentFile?: string,
+) {
+  const pack = await index.retrieveContext({
+    query: prompt,
+    ...(currentFile ? { currentFile } : {}),
+    budget: {
+      maxFiles: 6,
+      maxSnippets: 8,
+      maxLines: 240,
+      maxBytes: 24_000,
+      maxEstimatedTokens: 4_000,
+      maxGraphDepth: 1,
+    },
+  });
 
   return {
-    retrievalResults: results,
-    sourceContext: context.snippets.map((snippet) => ({
+    confidence: pack.confidence,
+    warnings: pack.warnings,
+    sourceContext: [...pack.primary, ...pack.related].map((snippet) => ({
       file: snippet.filePath,
       lines: `${snippet.range.startLine}-${snippet.range.endLine}`,
+      reason: snippet.reason,
       content: snippet.content,
     })),
-    telemetry: {
-      estimatedTokens: context.estimatedTokens,
-      bytesRead: context.bytesRead,
-      truncated: context.truncated,
-    },
+    nextCandidates: pack.nextCandidates,
+    telemetry: pack.metrics,
   };
 }

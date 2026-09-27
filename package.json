@@ -14,7 +14,6 @@
   "files": [
     "dist",
     "README.md",
-    "IMPLEMENTATION_PLAN.md",
     "examples"
   ],
   "engines": {
@@ -26,7 +25,8 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pack:check": "npm pack --dry-run",
-    "benchmark:graph": "npm run build && node benchmark/graph-update.mjs"
+    "benchmark:graph": "npm run build && node benchmark/graph-update.mjs",
+    "benchmark:retrieval": "npm run build && node benchmark/retrieval-compare.mjs"
   },
   "dependencies": {
     "@types/better-sqlite3": "^9.6.0",
